@@ -100,3 +100,24 @@ This will instruct it to use probing distance of 7.5 mm (i.e. distance in XY pla
 ```
 
 This will instruct it to probe an area area 30mm by 50 mm (starting at the work zero) using use default probing distance of 10 mm, travel height 2 mm and feedrate 50.0 mm/min. The loaded gcode will NOT be modified. If a (PROBEOPEN) has not been issued to save the values to a specific file, the probed values will be saved to a default file that can be used in a future run using (#autolevel_reapply).
+
+## CNCJS Widget
+
+This extension includes a custom CNCJS widget that provides a graphical interface for autoleveling and visualizing the mesh.
+
+### Installation
+
+1.  Navigate to the `widget` directory in this repository.
+2.  You can use the widget in two ways:
+    *   **Hosted**: Serve the `widget` directory using a web server (e.g., `python -m http.server` or `npm install -g http-server && http-server .`). Then add a "Web Page" widget in CNCJS pointing to the hosted `index.html`.
+    *   **iframe**: Some generic CNCJS widgets allow embedding local HTML.
+
+### Features
+
+*   **Settings Panel**: Easily configure Feedrate, Height, Margin, and Grid Size.
+*   **Initiate Autolevel**: One-click button to start the autoleveling sequence with the configured settings.
+*   **Reapply Mesh**: Button to reapply the last saved mesh to the currently loaded G-code.
+*   **Mesh Visualizer**: Real-time 2D heatmap visualization of the probed points.
+
+### Note on Visualizer
+The visualizer listens for specific G-code comments emitted by the extension. To view an existing mesh without re-probing, the widget automatically sends the `#autolevel_get_mesh` command on load, which triggers the extension to dump the current mesh data.

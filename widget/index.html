@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Autolevel Widget</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="widget-container">
+        <div class="panel settings-panel">
+            <h3>Settings</h3>
+            <div class="form-group">
+                <label for="feedrate">Feedrate (F):</label>
+                <input type="number" id="feedrate" value="50">
+            </div>
+            <div class="form-group">
+                <label for="height">Height (H):</label>
+                <input type="number" id="height" value="2">
+            </div>
+            <div class="form-group">
+                <label for="margin">Margin (M):</label>
+                <input type="number" id="margin" value="2.5">
+            </div>
+            <div class="form-group">
+                <label for="grid">Grid Size (GRID):</label>
+                <input type="number" id="grid" value="3" min="2">
+            </div>
+        </div>
+
+        <div class="panel actions-panel">
+            <button id="btn-autolevel" class="btn btn-primary">Initiate Autolevel</button>
+            <button id="btn-reapply" class="btn btn-secondary">Reapply Saved Mesh</button>
+        </div>
+
+        <div class="panel visualizer-panel">
+            <h3>Mesh Visualizer</h3>
+            <div id="visualizer-container">
+                <canvas id="mesh-canvas"></canvas>
+            </div>
+            <div id="status-text">No mesh data.</div>
+        </div>
+    </div>
+
+    <!-- Libraries -->
+    <script src="script.js"></script>
+</body>
+</html>

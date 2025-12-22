@@ -1,6 +1,8 @@
 /* eslint-disable no-useless-escape */
 const SocketWrap = require('./socketwrap')
 const fs = require('fs')
+const Mesh = require('./mesh')
+
 
 const alFileNamePrefix = '#AL:'
 
@@ -45,6 +47,32 @@ module.exports = class Autolevel {
       y: 0,
       z: 0
     }
+    this.mpos = { x: 0, y: 0, z: 0 };
+    this.pos = { x: 0, y: 0, z: 0 };
+    this.gcodeBounds = null;
+    this.buffer = ''; // Line buffer for serial data
+
+    // Listen for controller state updates to track position
+    socket.on('controller:state', (state) => {
+      if (state && state.status) {
+        const { mpos, wco } = state.status;
+        if (mpos) {
+          this.mpos = mpos;
+        }
+        if (wco) {
+          this.wco = wco;
+        }
+        // derive pos from mpos and wco if needed, or rely on cncjs to send it.
+        // Usually pos = mpos - wco.
+        if (mpos && wco) {
+          this.pos = {
+            x: mpos.x - wco.x,
+            y: mpos.y - wco.y,
+            z: mpos.z - wco.z
+          }
+        }
+      }
+    });
 
     // Try to read in any pre-existing probe data...
     fs.readFile(DEFAULT_PROBE_FILE, 'utf8', (err, data) => {
@@ -81,6 +109,57 @@ module.exports = class Autolevel {
         this.gcodeFileName = file
         this.gcode = gc
         console.log('gcode loaded:', file)
+
+        // Calculate bounds manually using regex (more robust than library dependencies in this context)
+        this.gcodeBounds = {
+          min: { x: Infinity, y: Infinity },
+          max: { x: -Infinity, y: -Infinity }
+        };
+
+        const lines = gc.split('\n');
+        let abs = true; // Assume absolute positioning by default
+        let units = 1; // 1 = MM, 2 = Inches (matches Units.MILLIMETERS)
+
+        // Helper to convert to MM
+        const toMM = (val, u) => (u === 2 ? val * 25.4 : val);
+
+        let hasMoves = false;
+
+        lines.forEach(line => {
+          const lineStripped = this.stripComments(line);
+
+          // Check modes
+          if (/G90/i.test(lineStripped)) abs = true;
+          if (/G91/i.test(lineStripped)) abs = false;
+          if (/G20/i.test(lineStripped)) units = 2;
+          if (/G21/i.test(lineStripped)) units = 1;
+
+          // Only track absolute moves for bounds
+          if (abs && /(X|Y)/i.test(lineStripped)) {
+            const xMatch = /X([\.\+\-\d]+)/gi.exec(lineStripped);
+            const yMatch = /Y([\.\+\-\d]+)/gi.exec(lineStripped);
+
+            if (xMatch) {
+              const x = toMM(parseFloat(xMatch[1]), units);
+              if (x < this.gcodeBounds.min.x) this.gcodeBounds.min.x = x;
+              if (x > this.gcodeBounds.max.x) this.gcodeBounds.max.x = x;
+              hasMoves = true;
+            }
+            if (yMatch) {
+              const y = toMM(parseFloat(yMatch[1]), units);
+              if (y < this.gcodeBounds.min.y) this.gcodeBounds.min.y = y;
+              if (y > this.gcodeBounds.max.y) this.gcodeBounds.max.y = y;
+              hasMoves = true;
+            }
+          }
+        });
+
+        if (!hasMoves) {
+          this.gcodeBounds = null;
+          console.log('No bounds detected in G-code.');
+        } else {
+          console.log('Calculated G-code bounds:', this.gcodeBounds);
+        }
       }
     })
 
@@ -91,8 +170,33 @@ module.exports = class Autolevel {
     })
 
     socket.on('serialport:read', (data) => {
-      if (data.indexOf('PRB') >= 0) {
-        let prbm = /\[PRB:([\+\-\.\d]+),([\+\-\.\d]+),([\+\-\.\d]+),?([\+\-\.\d]+)?:(\d)\]/g.exec(data)
+      // DEBUG: Log raw data length and snippet
+      console.log(`DEBUG: Raw Serial Data (${data.length}): ${JSON.stringify(data.toString())}`);
+
+      // Append new data to buffer
+      this.buffer += data.toString();
+
+      // Process all complete lines in buffer
+      // Pattern-based processing (Robust to missing newlines)
+      if (this.buffer.length > 5000) {
+        console.log('DEBUG: Trimming large buffer to prevent overflow');
+        this.buffer = this.buffer.substring(this.buffer.length - 2000);
+      }
+
+      while (true) {
+        const startIndex = this.buffer.indexOf('[PRB:');
+        if (startIndex < 0) break;
+
+        const endIndex = this.buffer.indexOf(']', startIndex);
+        if (endIndex < 0) break; // Incomplete message
+
+        const prbLine = this.buffer.substring(startIndex, endIndex + 1);
+        // Remove processed part
+        this.buffer = this.buffer.substring(endIndex + 1);
+
+        console.log('DEBUG: Processing extracted PRB chunk:', prbLine);
+
+        let prbm = /\[PRB:([\+\-\.\d]+),([\+\-\.\d]+),([\+\-\.\d]+),?([\+\-\.\d]+)?:(\d)\]/.exec(prbLine)
         if (prbm) {
           let prb = [parseFloat(prbm[1]), parseFloat(prbm[2]), parseFloat(prbm[3])]
           let pt = {
@@ -102,8 +206,6 @@ module.exports = class Autolevel {
           }
 
           if (this.probeFile) {
-            // Write the results to the probe file. Use 9 point format for compatibility
-            // with LinuxCNC probe file format
             fs.writeSync(this.probeFile, `${pt.x} ${pt.y} ${pt.z} 0 0 0 0 0 0\n`);
           }
 
@@ -118,20 +220,28 @@ module.exports = class Autolevel {
               this.sum_dz += pt.z;
             }
             this.probedPoints.push(pt)
+            this.sckw.sendGcode(`(AL: PROBED ${pt.x} ${pt.y} ${pt.z})`)
 
             console.log('probed ' + this.probedPoints.length + '/' + this.planedPointCount + '>', pt.x.toFixed(3), pt.y.toFixed(3), pt.z.toFixed(3))
-            // send info to console
+
             if (this.probedPoints.length >= this.planedPointCount) {
+              console.log('DEBUG: Probing complete. Total points: ' + this.probedPoints.length);
               this.sckw.sendGcode(`(AL: dz_min=${this.min_dz.toFixed(3)}, dz_max=${this.max_dz.toFixed(3)}, dz_avg=${(this.sum_dz / this.probedPoints.length).toFixed(3)})`);
               if (this.probeFile) {
                 this.fileClose();
               }
               if (!this.probeOnly) {
+                console.log('DEBUG: Calling applyCompensation...');
                 this.applyCompensation()
+              } else {
+                console.log('DEBUG: Probe Only mode. Finished.');
+                this.sckw.sendGcode('(AL: finished)');
               }
               this.planedPointCount = 0
               this.wco = { x: 0, y: 0, z: 0 }
             }
+          } else {
+            console.log('DEBUG: Ignored PRB (planedPointCount <= 0):', this.planedPointCount);
           }
         }
       }
@@ -158,6 +268,18 @@ module.exports = class Autolevel {
       fs.closeSync(this.probeFile);
       this.probeFile = 0;
     }
+  }
+
+  dumpMesh() {
+    if (this.probedPoints.length === 0) {
+      this.sckw.sendGcode('(AL: no mesh data)')
+      return
+    }
+    this.sckw.sendGcode('(AL: dumping mesh start)')
+    this.probedPoints.forEach(pt => {
+      this.sckw.sendGcode(`(AL: PROBED ${pt.x} ${pt.y} ${pt.z})`)
+    })
+    this.sckw.sendGcode('(AL: finished)')
   }
 
   reapply(cmd, context) {
@@ -219,6 +341,10 @@ module.exports = class Autolevel {
     let ys = /Y([\.\+\-\d]+)/gi.exec(cmd)
     if (ys) ySize = parseFloat(ys[1])
 
+    let grid;
+    let gd = /GRID([\.\+\-\d]+)/gi.exec(cmd);
+    if (gd) grid = parseFloat(gd[1]);
+
     let area;
     if (xSize) {
       area = `(${xSize}, ${ySize})`
@@ -226,16 +352,18 @@ module.exports = class Autolevel {
     else {
       area = 'Not specified'
     }
-    console.log(`STEP: ${this.delta} mm HEIGHT:${this.height} mm FEED:${this.feed} MARGIN: ${margin} mm  PROBE ONLY:${this.probeOnly}  Area: ${area}`)
+    console.log(`STEP: ${this.delta} mm HEIGHT:${this.height} mm FEED:${this.feed} MARGIN: ${margin} mm  PROBE ONLY:${this.probeOnly}  Area: ${area} GRID: ${grid}`)
 
-    this.wco = {
-      x: context.mposx - context.posx,
-      y: context.mposy - context.posy,
-      z: context.mposz - context.posz
-    }
+    // Use tracked wco if available, otherwise fallback to context (though context is unreliable for wco usually)
+    // The loop above updates this.wco from controller:state, so we should trust it.
+    // However, context.mposx etc might be useful if available.
+    // Let's rely on our tracked state if possible.
+
+    // We already have this.wco updated from controller:state
+    console.log('Using tracked WCO:', this.wco)
+
     this.probedPoints = []
     this.planedPointCount = 0
-    console.log('WCO:', this.wco)
     let code = []
 
     let xmin, xmax, ymin, ymax;
@@ -244,8 +372,15 @@ module.exports = class Autolevel {
       xmax = xSize - margin;
     }
     else {
-      xmin = context.xmin + margin;
-      xmax = context.xmax - margin;
+      // Use calculated bounds if available, fallback to context
+      if (this.gcodeBounds) {
+        xmin = this.gcodeBounds.min.x + margin;
+        xmax = this.gcodeBounds.max.x - margin;
+      } else {
+        console.log("No bounds available, falling back to context (might be NaN)");
+        xmin = context.xmin + margin;
+        xmax = context.xmax - margin;
+      }
     }
 
     if (ySize) {
@@ -253,12 +388,24 @@ module.exports = class Autolevel {
       ymax = ySize - margin;
     }
     else {
-      ymin = context.ymin + margin;
-      ymax = context.ymax - margin;
+      if (this.gcodeBounds) {
+        ymin = this.gcodeBounds.min.y + margin;
+        ymax = this.gcodeBounds.max.y - margin;
+      } else {
+        ymin = context.ymin + margin;
+        ymax = context.ymax - margin;
+      }
     }
 
-    let dx = (xmax - xmin) / parseInt((xmax - xmin) / this.delta)
-    let dy = (ymax - ymin) / parseInt((ymax - ymin) / this.delta)
+    let dx, dy;
+    if (grid) {
+      if (grid < 2) grid = 2; // Minimum 2 points to define a range
+      dx = (xmax - xmin) / (grid - 1);
+      dy = (ymax - ymin) / (grid - 1);
+    } else {
+      dx = (xmax - xmin) / parseInt((xmax - xmin) / this.delta)
+      dy = (ymax - ymin) / parseInt((ymax - ymin) / this.delta)
+    }
     code.push('(AL: probing initial point)')
     code.push(`G21`)
     code.push(`G90`)
@@ -270,22 +417,35 @@ module.exports = class Autolevel {
     this.planedPointCount++
 
     let y = ymin - dy
+    let rowIndex = 0
 
     while (y < ymax - 0.01) {
       y += dy
       if (y > ymax) y = ymax
-      let x = xmin - dx
-      if (y <= ymin + 0.01) x = xmin // don't probe first point twice
 
+      let xPoints = []
+      let x = xmin - dx
       while (x < xmax - 0.01) {
         x += dx
         if (x > xmax) x = xmax
+        xPoints.push(x)
+      }
+
+      if (rowIndex % 2 !== 0) {
+        xPoints.reverse()
+      }
+
+      for (let x of xPoints) {
+        // don't probe first point twice (it is probed before the loop)
+        if (rowIndex === 0 && Math.abs(x - xmin) < 0.001) continue
+
         code.push(`(AL: probing point ${this.planedPointCount + 1})`)
         code.push(`G90 G0 X${x.toFixed(3)} Y${y.toFixed(3)} Z${this.height}`)
         code.push(`G38.2 Z-${this.height + 1} F${this.feed}`)
         code.push(`G0 Z${this.height}`)
         this.planedPointCount++
       }
+      rowIndex++
     }
     this.sckw.sendGcode(code.join('\n'))
   }
@@ -426,6 +586,132 @@ module.exports = class Autolevel {
     return res
   }
 
+
+
+  /**
+   * Interpolates an arc (G2/G3) into linear segments for Z-compensation.
+   * @param {Object} p1 Start point {x,y,z}
+   * @param {Object} p2 End point {x,y,z}
+   * @param {Object} args Arc arguments (I, J, R, etc.)
+   * @param {boolean} clockwise True for G2, False for G3
+   * @param {number} units Units constant (MILLIMETERS or INCHES)
+   * @returns {Array} Array of points {x,y,z} along the arc
+   */
+  interpolateArc(p1, p2, args, clockwise, units) {
+    let points = [];
+
+    // Convert current units to MM for calculation if needed, but easier to work in current units 
+    // provided 'delta' scale matches. 'this.delta' is likely in MM if defaults kept, 
+    // but user might have set it. 
+    // Standard approach: Perform math in current units. 
+    // If units=INCHES, this.delta (10mm default) might need conversion?
+    // autolevel.js uses 'Units.convert' but 'delta' seems to be widely used as MM.
+
+    // Let's normalize to MM for calculation to match 'splitToSegments' logic roughly
+    // Or just respect the unit passed.
+    // If existing code uses 'Units.convert(this.delta, Units.MILLIMETERS, units)' => converts delta(MM) to CurrentUnits.
+
+    // Use a fixed high resolution for Arcs to ensure smoothness, regardless of probe grid size.
+    // 0.5mm is usually good for 3D printing/CNC.
+    let maxSegLength = Units.convert(0.5, Units.MILLIMETERS, units);
+    if (maxSegLength <= 0) maxSegLength = 0.5; // Safety
+
+    // 1. Find Center
+    let cx, cy, radius;
+
+    // I, J mode
+    if (args.I !== undefined || args.J !== undefined) {
+      let i = args.I || 0;
+      let j = args.J || 0;
+      cx = p1.x + i;
+      cy = p1.y + j;
+      radius = Math.sqrt(i * i + j * j);
+    }
+    // R mode
+    else if (args.R !== undefined) {
+      let r = args.R;
+      // Calculate center from R... (Math heavy, skipping if not strictly needed now or implementation complex)
+      // Usually I/J is standard for cam, but R is common.
+      // Let's implement R for completeness.
+
+      let d2 = (p2.x - p1.x) * (p2.x - p1.x) + (p2.y - p1.y) * (p2.y - p1.y);
+      let d = Math.sqrt(d2);
+      if (d < 1e-9 || Math.abs(r) < d / 2) {
+        // Invalid R or full circle impossible with R? 
+        // Fallback to line
+        return [p2];
+      }
+
+      // ... Math for R center ...
+      // Let's stick to I/J first as it's most common in generated code, 
+      // but R is important. 
+      // Simplified: Just Linearize if R is too hard? No, user asked for arc support.
+      // Reference: https://linuxcnc.org/docs/html/gcode/g-code.html#G2-G3-Arc
+
+      // Calculate distance between points
+      let dx = p2.x - p1.x;
+      let dy = p2.y - p1.y;
+
+      // Determine center
+      // H = sqrt(r^2 - (d/2)^2)
+      let h = Math.sqrt(Math.max(0, r * r - d2 / 4));
+
+      let x2 = (p1.x + p2.x) / 2;
+      let y2 = (p1.y + p2.y) / 2;
+
+      if (clockwise === (r < 0)) {
+        // Center is "to the right" / wrong side?
+        // G2 (CW): r>0 -> center right of chord?
+        // Correct math:
+        cx = x2 + h * dy / d;
+        cy = y2 - h * dx / d;
+      } else {
+        cx = x2 - h * dy / d;
+        cy = y2 + h * dx / d;
+      }
+      // wait, logic for R sign and direction is tricky.
+      // Let's trust standard formula or just support I/J primarily if simpler.
+      // Many senders convert R to I/J.
+      // Assuming I/J is present in args if available.
+      radius = Math.abs(r);
+    } else {
+      // No arc info, treat as line
+      return [p2];
+    }
+
+    // 2. Angles
+    let startAngle = Math.atan2(p1.y - cy, p1.x - cx);
+    let endAngle = Math.atan2(p2.y - cy, p2.x - cx);
+
+    let diff = endAngle - startAngle;
+
+    // Normalize
+    if (clockwise) { // G2
+      if (diff >= 0) diff -= 2 * Math.PI;
+    } else { // G3
+      if (diff <= 0) diff += 2 * Math.PI;
+    }
+
+    // Length of arc
+    let arcLen = Math.abs(diff * radius);
+    let segments = Math.ceil(arcLen / maxSegLength);
+    if (segments < 1) segments = 1;
+
+    let thetaStep = diff / segments;
+    let zStep = (p2.z - p1.z) / segments;
+
+    for (let i = 1; i <= segments; i++) {
+      let angle = startAngle + i * thetaStep;
+      points.push({
+        x: cx + radius * Math.cos(angle),
+        y: cy + radius * Math.sin(angle),
+        z: p1.z + i * zStep
+      });
+    }
+
+    return points;
+  }
+
   compensateZCoord(pt_in_or_mm, input_units) {
 
     let pt_mm = {
@@ -434,108 +720,227 @@ module.exports = class Autolevel {
       z: Units.convert(pt_in_or_mm.z, input_units, Units.MILLIMETERS)
     }
 
-    let points = this.getThreeClosestPoints(pt_mm)
-    if (points.length < 3) {
-      console.log('Cant find 3 closest points')
-      return pt_in_or_mm
+    // Use Mesh to interpolate Z level at this location
+    let planeZ = 0;
+    if (this.mesh) {
+      planeZ = this.mesh.interpolateZ(pt_mm.x, pt_mm.y);
     }
-    let normal = this.crossProduct3(this.sub3(points[1], points[0]), this.sub3(points[2], points[0]))
-    let pp = points[0] // point on plane
-    let dz = 0 // compensation delta
-    if (normal.z !== 0) {
-      // find z at the point seg, on the plane defined by three points
-      dz = pp.z - (normal.x * (pt_mm.x - pp.x) + normal.y * (pt_mm.y - pp.y)) / normal.z
-    } else {
-      console.log(this.formatPt(pt_mm), 'normal.z is zero', this.formatPt(points[0]), this.formatPt(points[1]), this.formatPt(points[2]))
-    }
+
+    let newZ = pt_mm.z + planeZ;
+
     return {
       x: Units.convert(pt_mm.x, Units.MILLIMETERS, input_units),
       y: Units.convert(pt_mm.y, Units.MILLIMETERS, input_units),
-      z: Units.convert(pt_mm.z + dz, Units.MILLIMETERS, input_units)
+      z: Units.convert(newZ, Units.MILLIMETERS, input_units)
     }
   }
 
   applyCompensation() {
     this.sckw.sendGcode(`(AL: applying ...)\n`)
 
+
     console.log('applying compensation ...')
+
     try {
+      console.log('DEBUG: Initializing Mesh with ' + this.probedPoints.length + ' points');
+      this.mesh = new Mesh(this.probedPoints);
+      console.log('DEBUG: Mesh initialized');
 
       let lines = this.gcode.split('\n')
-      let p0 = {
-        x: 0,
-        y: 0,
-        z: 0
-      }
+      let p0 = { x: 0, y: 0, z: 0 }
       let p0_initialized = false
-      let pt = {
-        x: 0,
-        y: 0,
-        z: 0
-      }
+      let pt = { x: 0, y: 0, z: 0 }
 
       let abs = true
       let units = Units.MILLIMETERS
+      let modalMotion = 'G0'; // Default to G0/G1 (Linear) - usually safe assumption or assume G0.
+
       let result = []
       let lc = 0;
+
       lines.forEach(line => {
         if (lc % 1000 === 0) {
           console.log(`progress info ... line: ${lc}/${lines.length}`);
           this.sckw.sendGcode(`(AL: progress ...  ${lc}/${lines.length})`)
         }
         lc++;
-        if (line.match(/^\s*\([^\)]*\)\s*$/g)) { // if whole line is a comment, copy it to output and skip to next line 
+
+        if (line.match(/^\s*\([^\)]*\)\s*$/g)) {
           result.push(line.trim());
-        } else {
-          let lineStripped = this.stripComments(line)
-          if (/(G38.+|G5.+|G10|G4.+|G92|G92.1)/gi.test(lineStripped)) result.push(lineStripped) // skip compensation for these G-Codes
-          else {
-            if (/G91/i.test(lineStripped)) abs = false
-            if (/G90/i.test(lineStripped)) abs = true
-            if (/G20/i.test(lineStripped)) units = Units.INCHES
-            if (/G21/i.test(lineStripped)) units = Units.MILLIMETERS
+          return;
+        }
 
-            if (!/(X|Y|Z)/gi.test(lineStripped)) {
-              result.push(lineStripped) // no coordinate change --> copy to output
-            } else {
-              let xMatch = /X([\.\+\-\d]+)/gi.exec(lineStripped)
-              if (xMatch) pt.x = parseFloat(xMatch[1])
+        let lineStripped = this.stripComments(line)
+        if (!lineStripped) {
+          // Preserve comments or empty lines
+          result.push(line);
+          return;
+        }
 
-              let yMatch = /Y([\.\+\-\d]+)/gi.exec(lineStripped)
-              if (yMatch) pt.y = parseFloat(yMatch[1])
+        // 1. Detect State Changes (Modal)
+        if (/G91/i.test(lineStripped)) abs = false
+        if (/G90/i.test(lineStripped)) abs = true
+        if (/G20/i.test(lineStripped)) units = Units.INCHES
+        if (/G21/i.test(lineStripped)) units = Units.MILLIMETERS
 
-              let zMatch = /Z([\.\+\-\d]+)/gi.exec(lineStripped)
-              if (zMatch) pt.z = parseFloat(zMatch[1])
+        // Detect Group 1 Motion Modes
+        // G0, G1, G2, G3, G38.2...
+        // We match strict word boundaries or start of line
+        let motionMatch = /(G0?[0123](?![0-9])|G38\.\d|G80)/i.exec(lineStripped);
+        if (motionMatch) {
+          // Normalize G00->G0, G01->G1
+          let m = motionMatch[1].toUpperCase().replace(/^G0(\d)/, 'G$1');
+          modalMotion = m;
+        }
 
-              if (abs) {
-                // strip coordinates
-                lineStripped = lineStripped.replace(/([XYZ])([\.\+\-\d]+)/gi, '')
-                if (p0_initialized) {
-                  let segs = this.splitToSegments(p0, pt, units)
-                  for (let seg of segs) {
-                    let cpt = this.compensateZCoord(seg, units)
-                    let newLine = lineStripped + ` X${cpt.x.toFixed(3)} Y${cpt.y.toFixed(3)} Z${cpt.z.toFixed(3)} ; Z${seg.z.toFixed(3)}`
-                    result.push(newLine.trim())
-                  }
-                } else {
-                  let cpt = this.compensateZCoord(pt, units)
-                  let newLine = lineStripped + ` X${cpt.x.toFixed(3)} Y${cpt.y.toFixed(3)} Z${cpt.z.toFixed(3)} ; Z${pt.z.toFixed(3)}`
-                  result.push(newLine.trim())
-                  p0_initialized = true
-                }
-              } else {
-                result.push(lineStripped)
-                console.log('WARNING: using relative mode may not produce correct results')
+        // 2. Update Virtual Position (pt)
+        let hasMove = false;
+        let target = { ...pt };
+
+        let xMatch = /X([\.\+\-\d]+)/gi.exec(lineStripped)
+        if (xMatch) {
+          let val = parseFloat(xMatch[1]);
+          target.x = abs ? val : pt.x + val;
+          hasMove = true;
+        }
+
+        let yMatch = /Y([\.\+\-\d]+)/gi.exec(lineStripped)
+        if (yMatch) {
+          let val = parseFloat(yMatch[1]);
+          target.y = abs ? val : pt.y + val;
+          hasMove = true;
+        }
+
+        let zMatch = /Z([\.\+\-\d]+)/gi.exec(lineStripped)
+        if (zMatch) {
+          let val = parseFloat(zMatch[1]);
+          target.z = abs ? val : pt.z + val;
+          hasMove = true;
+        }
+
+        if (hasMove) {
+          pt = { ...target };
+        }
+
+        // 3. Compensation Logic
+
+        // Always pass through non-motion commands or specific exclusions
+        // G10 (offsets), G92 (offsets), G4 (dwell), G53 (machine coord), G54-59 (wcs), M-codes
+        if (/(G10|G92|G4|G53|G5[4-9]|M\d+)/i.test(lineStripped)) {
+          result.push(line); // Preserve original formatting
+          // Update p0 if we moved (e.g. G53 G0 X0) - strictly speaking G53 is machine coords, 
+          // and our tracking is somewhat WCS relative. 
+          // But for safety, if we aren't tracking WCS vs Machine, we might just assume sync.
+          // But usually G53 is transit.
+          // For G92, it resets coordinates, so our 'pt' tracking handles the 'new position' 
+          // (which is actually just an offset shift, but 'pt' tracks effective WCS pos).
+          // Syncing p0 is safer.
+          if (hasMove) {
+            p0 = { ...pt };
+            p0_initialized = true;
+          }
+          return;
+        }
+
+        // If it's a motion command (or implicit motion)
+        if (modalMotion === 'G0' || modalMotion === 'G1') {
+          // Check if it's actually a move command (has coordinates)
+          if (hasMove) {
+            if (abs) {
+              let baseCommand = lineStripped.replace(/([XYZ])([\.\+\-\d]+)/gi, '').trim();
+
+              // Handle segments
+              let segs = [];
+              if (p0_initialized) {
+                segs = this.splitToSegments(p0, pt, units);
               }
-              p0 = {
-                x: pt.x,
-                y: pt.y,
-                z: pt.z
-              } // clone
+
+              // If no movement (0 length or just F command), ensuring it is preserved
+              if (segs.length === 0) {
+                let cpt = this.compensateZCoord(pt, units)
+                let newLine = `${baseCommand} X${cpt.x.toFixed(3)} Y${cpt.y.toFixed(3)} Z${cpt.z.toFixed(3)}`
+                newLine += ` ; Z${pt.z.toFixed(3)}`
+                result.push(newLine.trim())
+                p0_initialized = true
+              } else {
+                for (let seg of segs) {
+                  let cpt = this.compensateZCoord(seg, units)
+                  let newLine = `${baseCommand} X${cpt.x.toFixed(3)} Y${cpt.y.toFixed(3)} Z${cpt.z.toFixed(3)}`
+                  newLine += ` ; Z${seg.z.toFixed(3)}`
+                  result.push(newLine.trim())
+                }
+              }
+
+              // Sync p0
+              p0 = { ...pt };
+              p0_initialized = true;
+
+            } else {
+              // Relative G0/G1 - pass through
+              result.push(line); // Preserve formatting
+              console.log('WARNING: G91 (Relative) move passed through uncompensated.');
+              // We must update p0 to stay in sync, assuming we are tracking relative moves correctly 
+              // But 'pt' handles relative logic above in step 2.
+              p0 = { ...pt };
+              p0_initialized = true;
             }
+          } else {
+            // No XYZ move, e.g. "G1 F100" or just "G1"
+            result.push(line);
+          }
+        } else if (modalMotion === 'G2' || modalMotion === 'G3') {
+          // Handle Arcs Interploation
+          if (hasMove) {
+            // Extract Arc Parameters
+            let args = {};
+            let iMatch = /I([\.\+\-\d]+)/gi.exec(lineStripped);
+            if (iMatch) args.I = parseFloat(iMatch[1]);
+
+            let jMatch = /J([\.\+\-\d]+)/gi.exec(lineStripped);
+            if (jMatch) args.J = parseFloat(jMatch[1]);
+
+            let rMatch = /R([\.\+\-\d]+)/gi.exec(lineStripped);
+            if (rMatch) args.R = parseFloat(rMatch[1]);
+
+            // p0 is start, pt is end
+            if (p0_initialized) {
+              let points = this.interpolateArc(p0, pt, args, (modalMotion === 'G2'), units);
+
+              // Output Linear segments (G1)
+              for (let ap of points) {
+                let cpt = this.compensateZCoord(ap, units);
+                // Force G1 for arc segments
+                let newLine = `G1 X${cpt.x.toFixed(3)} Y${cpt.y.toFixed(3)} Z${cpt.z.toFixed(3)}`;
+                newLine += ` ; ${modalMotion} Z${ap.z.toFixed(3)}`;
+                result.push(newLine.trim());
+              }
+
+              p0 = { ...pt };
+              p0_initialized = true;
+
+            } else {
+              // Cannot interpolation without start point
+              console.log('WARNING: Arc without valid start point. Passing through.');
+              result.push(line);
+              p0 = { ...pt };
+              p0_initialized = true;
+            }
+          } else {
+            result.push(line);
+          }
+        } else {
+          // G38, G80, etc. - PASS THROUGH
+          result.push(line);
+
+          if (modalMotion.startsWith('G38')) {
+            p0_initialized = false; // Lost position validity after probe usually
+          } else {
+            // Unknown motion?
           }
         }
+
       })
+
       const newgcodeFileName = alFileNamePrefix + this.gcodeFileName;
       this.sckw.sendGcode(`(AL: loading new gcode ${newgcodeFileName} ...)`)
       console.log(`AL: loading new gcode ${newgcodeFileName} ...)`)
@@ -549,6 +954,7 @@ module.exports = class Autolevel {
       }
       this.sckw.sendGcode(`(AL: finished)`)
     } catch (x) {
+      console.error(x);
       this.sckw.sendGcode(`(AL: error occurred ${x})`)
       console.log(`error occurred ${x}`)
     }

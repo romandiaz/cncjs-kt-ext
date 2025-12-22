@@ -11,22 +11,22 @@ const http = require('http');
 
 //#region  prevent starting multiple instances
 // create Sentinel server
-let server = http.createServer(function(req, res) {
-    res.send("ok");
+let server = http.createServer(function (req, res) {
+  res.send("ok");
 });
 // make sure this server doesn't keep the process running
 server.unref();
 
-server.on('error', function(e) {
-    if (e.code === "EADDRINUSE") {
-        console.log("Can't run more than one instance");
-        process.exit(1);
-    } else {
-        console.log(e);
-    }
+server.on('error', function (e) {
+  if (e.code === "EADDRINUSE") {
+    console.log("Can't run more than one instance");
+    process.exit(1);
+  } else {
+    console.log(e);
+  }
 });
-server.listen(8399, function() {
-   console.log("Sentinel server running")   
+server.listen(8399, function () {
+  console.log("Sentinel server running")
 });
 //#endregion prevent starting multiple instances
 
@@ -197,6 +197,8 @@ function callback(err, socket) {
   socket.on('serialport:write', function (data, context) {
     if (data.indexOf('#autolevel_reapply') >= 0 && context && context.source === 'feeder') {
       autolevel.reapply(data, context)
+    } else if (data.indexOf('#autolevel_get_mesh') >= 0 && context && context.source === 'feeder') {
+      autolevel.dumpMesh();
     } else if (data.indexOf('#autolevel') >= 0 && context && context.source === 'feeder') {
       autolevel.start(data, context)
     } else if (data.indexOf('PROBEOPEN') > 0) {
