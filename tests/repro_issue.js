@@ -1,4 +1,4 @@
-const Autolevel = require('../autolevel');
+const Autolevel = require('../src/extension/autolevel');
 
 // Mock Socket
 class MockSocket {
@@ -23,7 +23,7 @@ class MockSocket {
 // So we need to mock what SocketWrap expects or mock SocketWrap itself.
 // Since we require('../autolevel'), we can't easily mock SocketWrap unless we use a proxy or assume SocketWrap just works with our mock socket.
 // Let's verify SocketWrap.
-const SocketWrap = require('../socketwrap');
+const SocketWrap = require('../src/extension/socketwrap');
 // Assume SocketWrap delegates to socket.
 
 const socket = new MockSocket();

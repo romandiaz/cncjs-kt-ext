@@ -1,5 +1,5 @@
 
-const Mesh = require('./mesh');
+const Mesh = require('../src/extension/mesh');
 
 // Helper to check approximate equality
 function assertApprox(actual, expected, msg) {

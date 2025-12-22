@@ -2,10 +2,16 @@
   "name": "cncjs-kt-ext",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "keywords": [
+    "cncjs",
+    "widget",
+    "extension"
+  ],
+  "main": "src/extension/index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node ."
+    "start": "node src/extension/index.js",
+    "build": "node -e \"const fs = require('fs'); if (fs.existsSync('dist')) { fs.rmSync('dist', {recursive: true, force: true}); } fs.mkdirSync('dist'); const files = fs.readdirSync('src/widget'); files.forEach(file => fs.copyFileSync('src/widget/' + file, 'dist/' + file));\""
   },
   "author": "",
   "license": "ISC",

@@ -10,7 +10,7 @@ It will probe the surface (within gcode boundaries (xmin,ymin) - (xmax,ymax)) an
 git clone https://github.com/kreso-t/cncjs-kt-ext.git
 cd cncjs-kt-ext
 npm install
-node . --port /dev/ttyACM0
+npm start -- --port /dev/ttyACM0
 ```
 
 Once started it will (by default) connect to local cncjs server and register it self for listening and sending commands (similar way as i.e. cncjs keyboard pendant).
@@ -107,10 +107,13 @@ This extension includes a custom CNCJS widget that provides a graphical interfac
 
 ### Installation
 
-1.  Navigate to the `widget` directory in this repository.
+1.  Run `npm run build` in the root directory. This will create a `dist` folder containing the widget files.
 2.  You can use the widget in two ways:
-    *   **Hosted**: Serve the `widget` directory using a web server (e.g., `python -m http.server` or `npm install -g http-server && http-server .`). Then add a "Web Page" widget in CNCJS pointing to the hosted `index.html`.
-    *   **iframe**: Some generic CNCJS widgets allow embedding local HTML.
+    *   **Hosted**: Serve the `dist` directory using a web server (e.g., `python -m http.server` or `npm install -g http-server && http-server .`). Then add a "Web Page" widget in CNCJS pointing to the hosted `index.html`.
+    *   **Mount**: Mount the `dist` folder in CNCJS using the `--mount` option:
+        ```bash
+        cncjs --mount /widget:/path/to/cncjs-kt-ext/dist
+        ```
 
 ### Features
 

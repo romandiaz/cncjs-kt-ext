@@ -1,5 +1,5 @@
 const fs = require('fs');
-const Autolevel = require('./autolevel');
+const Autolevel = require('../src/extension/autolevel');
 
 // Mock Socket
 const mockSocket = {

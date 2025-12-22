@@ -1,5 +1,5 @@
 
-const Autolevel = require('./autolevel');
+const Autolevel = require('../src/extension/autolevel');
 
 console.log("--- INTEGRATION TEST: Autolevel with Bilinear Mesh ---");
 
